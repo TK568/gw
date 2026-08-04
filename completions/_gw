@@ -1,0 +1,41 @@
+#compdef gw
+
+_gw() {
+  local -a subcommands
+  subcommands=(
+    'switch:worktree に移動（-c で作成）'
+    'remove:worktree を削除して main に戻る'
+    'list:worktree のブランチ一覧'
+    'migrate:ローカルファイルのシンボリックリンクを既存 worktree に張る'
+  )
+
+  if (( CURRENT == 2 )); then
+    _describe 'subcommand' subcommands
+    return
+  fi
+
+  case "$words[2]" in
+    switch)
+      if (( CURRENT == 3 )); then
+        local -a flags branches
+        flags=('-c:新規または既存ブランチのworktreeを作成してcd')
+        _describe 'flag' flags
+        branches=(${(f)"$(command gw list --branches 2>/dev/null)"})
+        _describe 'branch' branches
+      elif (( CURRENT == 4 && words[3] == "-c" )); then
+        local -a branches
+        branches=(${(f)"$(command gw list --all-branches 2>/dev/null)"})
+        _describe 'branch' branches
+      fi
+      ;;
+    remove)
+      if (( CURRENT == 3 )); then
+        local -a branches
+        branches=(${(f)"$(command gw list --removable 2>/dev/null)"})
+        _describe 'branch' branches
+      fi
+      ;;
+  esac
+}
+
+_gw "$@"

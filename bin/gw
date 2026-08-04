@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+# gw - git worktree helper
+#
+# stdout はシェルラッパーが cd 先として解釈する（switch / remove）ため、
+# 人間向けメッセージはすべて stderr に出す。
+set -euo pipefail
+
+VERSION="0.1.0"
+
+err() { echo "$@" >&2; }
+
+usage() {
+  err "Usage: gw switch [-c] <branch>"
+  err "       gw remove <branch>"
+  err "       gw list [--branches|--removable|--all-branches]"
+  err "       gw migrate"
+  err "       gw init zsh"
+}
+
+main_worktree() {
+  git worktree list | head -1 | awk '{print $1}'
+}
+
+# git config gw.local-files（コロン区切り）を1行1ファイルで出力する
+local_files() {
+  git config --get gw.local-files 2>/dev/null | tr ':' '\n' || true
+}
+
+worktree_path_for_branch() {
+  local branch="$1"
+  git worktree list --porcelain \
+    | awk -v b="refs/heads/${branch}" '/^worktree/{wt=$2} $0=="branch " b {print wt; exit}'
+}
+
+link_local_files() {
+  local src="$1" dest="$2" f
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    if [[ -f "${src}/${f}" ]]; then
+      mkdir -p "${dest}/$(dirname "$f")"
+      ln -sf "${src}/${f}" "${dest}/${f}"
+    fi
+  done < <(local_files)
+}
+
+cmd_switch() {
+  local branch="${1:-}"
+  if [[ "$branch" == "-c" ]]; then
+    branch="${2:-}"
+    [[ -z "$branch" ]] && { usage; return 1; }
+    cmd_switch_create "$branch"
+    return
+  fi
+  [[ -z "$branch" ]] && { usage; return 1; }
+
+  local wt_path
+  wt_path=$(worktree_path_for_branch "$branch")
+  if [[ -z "$wt_path" ]]; then
+    err "worktree not found for branch: $branch"
+    return 1
+  fi
+  echo "$wt_path"
+}
+
+cmd_switch_create() {
+  local branch="$1"
+  local main_path root repo dest
+  main_path=$(main_worktree)
+  root=$(dirname "$main_path")
+  repo=$(basename "$main_path")
+  dest="${root}/${repo}-${branch//\//-}"
+
+  # worktree が既に存在する場合はそちらへ
+  local existing_path
+  existing_path=$(worktree_path_for_branch "$branch")
+  if [[ -n "$existing_path" ]]; then
+    if [[ -d "$existing_path" ]]; then
+      echo "$existing_path"
+      return
+    fi
+    git worktree prune
+  fi
+
+  # rebase 中など detached HEAD でブランチ名検索をすり抜けた場合
+  if [[ -d "$dest" ]]; then
+    local git_dir
+    git_dir=$(git -C "$dest" rev-parse --absolute-git-dir 2>/dev/null || true)
+    if [[ -n "$git_dir" && ( -d "$git_dir/rebase-merge" || -d "$git_dir/rebase-apply" ) ]]; then
+      err "error: '$dest' で rebase が進行中です。"
+      err "  中断: git -C \"$dest\" rebase --abort"
+      err "  削除: gw remove $branch"
+    else
+      err "error: '$dest' は既に存在します。"
+      err "  削除: gw remove $branch"
+    fi
+    return 1
+  fi
+
+  # ブランチが既存かどうかで add の引数を切り替える
+  if git branch --list "$branch" | grep -q .; then
+    git fetch origin "$branch" >/dev/null 2>&1 || true
+    if git rev-parse --verify "origin/$branch" >/dev/null 2>&1; then
+      if git merge-base --is-ancestor "origin/$branch" "$branch" 2>/dev/null; then
+        : # local が先行しているだけなら何もしない
+      else
+        # local が遅れている・分岐している場合は remote に合わせる
+        git branch -f "$branch" "origin/$branch"
+      fi
+    fi
+    git worktree add "$dest" "$branch" >&2
+  else
+    git fetch origin "$branch" >/dev/null 2>&1 || true
+    if git rev-parse --verify "origin/$branch" >/dev/null 2>&1; then
+      git worktree add -b "$branch" "$dest" "origin/$branch" >&2
+    else
+      git worktree add -b "$branch" "$dest" >&2
+    fi
+  fi
+
+  link_local_files "$main_path" "$dest"
+  echo "$dest"
+}
+
+cmd_remove() {
+  local branch="${1:-}"
+  [[ -z "$branch" ]] && { usage; return 1; }
+
+  local wt_path main_path
+  wt_path=$(worktree_path_for_branch "$branch")
+  if [[ -z "$wt_path" ]]; then
+    err "worktree not found for branch: $branch"
+    return 1
+  fi
+  main_path=$(main_worktree)
+  git -C "$main_path" worktree remove "$wt_path" >&2
+  echo "$main_path"
+}
+
+cmd_migrate() {
+  local src wt f
+  src=$(main_worktree)
+  git worktree list --porcelain | awk '/^worktree/{print $2}' | tail -n +2 \
+    | while IFS= read -r wt; do
+        while IFS= read -r f; do
+          [[ -z "$f" ]] && continue
+          local target="${wt}/${f}" link_src="${src}/${f}"
+          if [[ ! -f "$link_src" ]]; then
+            continue
+          fi
+          if [[ -L "$target" ]]; then
+            echo "skip (already symlink): ${target}"
+          elif [[ -f "$target" ]]; then
+            ln -sf "$link_src" "$target"
+            echo "converted: ${target} -> ${link_src}"
+          else
+            mkdir -p "$(dirname "$target")"
+            ln -sf "$link_src" "$target"
+            echo "created: ${target} -> ${link_src}"
+          fi
+        done < <(local_files)
+      done
+}
+
+cmd_list() {
+  case "${1:-}" in
+    "")
+      git worktree list | awk '{gsub(/[\[\]]/, "", $3); print $3}'
+      ;;
+    --branches)
+      git worktree list --porcelain | awk '/^branch/{sub("refs/heads/","",$2); print $2}'
+      ;;
+    --removable)
+      local main_path
+      main_path=$(main_worktree)
+      git worktree list --porcelain \
+        | awk -v main="$main_path" \
+          '/^worktree/{wt=$2} /^branch/ && wt!=main {sub("refs/heads/","",$2); print $2}'
+      ;;
+    --all-branches)
+      git branch --format='%(refname:short)'
+      ;;
+    *)
+      usage
+      return 1
+      ;;
+  esac
+}
+
+cmd_init() {
+  case "${1:-}" in
+    zsh)
+      cat <<'WRAPPER'
+gw() {
+  case "${1:-}" in
+    switch|remove)
+      local dest
+      dest=$(command gw "$@") || return $?
+      [[ -n "$dest" ]] && cd "$dest"
+      ;;
+    *) command gw "$@" ;;
+  esac
+}
+WRAPPER
+      ;;
+    *)
+      err "Usage: gw init zsh"
+      return 1
+      ;;
+  esac
+}
+
+case "${1:-}" in
+  switch)  shift; cmd_switch "$@" ;;
+  remove)  shift; cmd_remove "$@" ;;
+  list)    shift; cmd_list "$@" ;;
+  migrate) cmd_migrate ;;
+  init)    shift; cmd_init "$@" ;;
+  --version|version) echo "gw ${VERSION}" ;;
+  *) usage; exit 1 ;;
+esac
