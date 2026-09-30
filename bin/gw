@@ -32,10 +32,21 @@ worktree_path_for_branch() {
     | awk -v b="refs/heads/${branch}" '/^worktree/{wt=$2} $0=="branch " b {print wt; exit}'
 }
 
+# worktree のブランチで追跡中のファイルはリンクに置き換えない。
+# 置き換えると git status に typechange が出て rebase が止まる。
+is_tracked() {
+  local wt="$1" f="$2"
+  git -C "$wt" ls-files --error-unmatch -- "$f" >/dev/null 2>&1
+}
+
 link_local_files() {
   local src="$1" dest="$2" f
   while IFS= read -r f; do
     [[ -z "$f" ]] && continue
+    if is_tracked "$dest" "$f"; then
+      err "skip (tracked): ${dest}/${f}"
+      continue
+    fi
     if [[ -f "${src}/${f}" ]]; then
       mkdir -p "${dest}/$(dirname "$f")"
       ln -sf "${src}/${f}" "${dest}/${f}"
@@ -147,7 +158,9 @@ cmd_migrate() {
           if [[ ! -f "$link_src" ]]; then
             continue
           fi
-          if [[ -L "$target" ]]; then
+          if is_tracked "$wt" "$f"; then
+            echo "skip (tracked): ${target}"
+          elif [[ -L "$target" ]]; then
             echo "skip (already symlink): ${target}"
           elif [[ -f "$target" ]]; then
             ln -sf "$link_src" "$target"

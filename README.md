@@ -43,6 +43,8 @@ git config --global gw.local-files ".claude/settings.local.json:mise.toml"
 git config gw.local-files ".claude/settings.local.json:mise.toml:.env.myproject"
 ```
 
+そのブランチで git が追跡しているファイルはリンクしません（`skip (tracked)` と出力して飛ばします）。リンクに置き換えると `git status` に typechange が出て rebase が止まるためです。
+
 ## 動作要件
 
 - git 2.x（`git worktree` が必要）
